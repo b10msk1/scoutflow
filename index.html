@@ -217,13 +217,22 @@
         import { getFirestore, collection, doc, deleteDoc, addDoc, onSnapshot } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
 
         // --- CONFIGURATION ---
-        const apiKey = ""; 
-        const firebaseConfig = typeof __firebase_config !== 'undefined' ? JSON.parse(__firebase_config) : {};
+        let GEMINI_API_KEY = ""; // Klistra in din Gemini API-nyckel här om du vill slippa få popup-rutan i appen
+        const firebaseConfig = typeof __firebase_config !== 'undefined' ? JSON.parse(__firebase_config) : null;
         const appId = typeof __app_id !== 'undefined' ? __app_id : 'prompt-scout-flow-v1'; 
         
-        const app = initializeApp(firebaseConfig);
-        const auth = getAuth(app);
-        const db = getFirestore(app);
+        let app, auth, db;
+        
+        // Förhindra krasch på externa sidor (t.ex. GitHub Pages) där Firebase-config saknas
+        if (firebaseConfig && Object.keys(firebaseConfig).length > 0) {
+            try {
+                app = initializeApp(firebaseConfig);
+                auth = getAuth(app);
+                db = getFirestore(app);
+            } catch(e) { console.warn("Firebase Init Error:", e); }
+        } else {
+            console.warn("Appen körs i offline-läge utan Firebase. Moln-synken är inaktiverad.");
+        }
 
         const CATEGORIES = [
           { id: 'human', label: 'Stil & Mänsklighet', icon: 'user' },
@@ -272,7 +281,14 @@
 
         // --- API ENGINE ---
         const callGemini = async (prompt, systemInstruction = "", images = []) => {
-            const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-09-2025:generateContent?key=${apiKey}`;
+            if (!GEMINI_API_KEY || GEMINI_API_KEY === "") {
+                GEMINI_API_KEY = window.prompt("Vänligen ange din Google Gemini API-nyckel för att generera alternativ (Skaffas gratis via Google AI Studio):");
+                if (!GEMINI_API_KEY) {
+                    showEl('global-loading', false);
+                    throw new Error("Ingen API-nyckel angiven.");
+                }
+            }
+            const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-09-2025:generateContent?key=${GEMINI_API_KEY}`;
             const parts = [{ text: prompt }];
             images.forEach(img => {
                 if (img) parts.push({ inlineData: { mimeType: "image/png", data: img.split(',')[1] } });
@@ -302,7 +318,7 @@
         // --- FIREBASE SYNC ---
         let vaultUnsubscribe = null;
         const setupFirestore = () => {
-            if (!state.user) return;
+            if (!state.user || !db) return;
             if(vaultUnsubscribe) vaultUnsubscribe();
             
             const q = collection(db, 'artifacts', appId, 'users', state.user.uid, 'vault');
@@ -313,6 +329,7 @@
         };
 
         const initAuth = async () => {
+            if (!auth) return;
             try {
                 if (typeof __initial_auth_token !== 'undefined' && __initial_auth_token) {
                     await signInWithCustomToken(auth, __initial_auth_token);
@@ -322,12 +339,13 @@
             } catch(e) { console.error("Auth failed:", e); }
         };
         
-        onAuthStateChanged(auth, (user) => {
-            state.user = user;
-            if(user) setupFirestore();
-        });
-
-        initAuth();
+        if (auth) {
+            onAuthStateChanged(auth, (user) => {
+                state.user = user;
+                if(user) setupFirestore();
+            });
+            initAuth();
+        }
 
         // --- RENDER LOGIC ---
         const renderCategories = () => {
@@ -842,6 +860,7 @@
 
         window.saveToVault = async () => {
             if(!state.user || !state.modalContent.raw) return;
+            if(!db) { alert("Kan inte spara till valv eftersom databasen (Firebase) inte är ansluten på denna domän."); return; }
             try {
                 await addDoc(collection(db, 'artifacts', appId, 'users', state.user.uid, 'vault'), {
                     title: state.modalContent.raw.title,
@@ -854,7 +873,7 @@
         };
 
         window.deletePrompt = async (id) => {
-            if(!state.user) return;
+            if(!state.user || !db) return;
             await deleteDoc(doc(db, 'artifacts', appId, 'users', state.user.uid, 'vault', id));
         };
 
@@ -873,7 +892,10 @@
         };
 
         window.handleJsonImport = (e) => {
-            if (!state.user) return;
+            if (!state.user || !db) {
+                alert("Databasen (Firebase) är inte konfigurerad. Kan inte importera JSON till valvet.");
+                return;
+            }
             const file = e.target.files[0];
             if (!file) return;
             const reader = new FileReader();
